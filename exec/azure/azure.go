@@ -14,18 +14,35 @@
  * limitations under the License.
  */
 
-package category
+package azure
 
-const (
-	Cloud            = "cloud"
-	Aliyun           = "aliyun"
-	Ecs              = "ecs"
-	NetworkInterface = "networkInterface"
-	PrivateIp        = "privateIp"
-	PublicIp         = "publicIp"
-	SecurityGroup    = "securityGroup"
-	VSwitch          = "vSwitch"
-	Disk             = "disk"
-	Azure            = "azure"
-	VirtualMachine   = "vm"
+import (
+	"github.com/chaosblade-io/chaosblade-spec-go/spec"
 )
+
+type AzureCommandSpec struct {
+	spec.BaseExpModelCommandSpec
+}
+
+func NewAliyunCommandSpec() spec.ExpModelCommandSpec {
+	return &AzureCommandSpec{
+		spec.BaseExpModelCommandSpec{
+			ExpActions: []spec.ExpActionCommandSpec{
+				// TODO
+			},
+			ExpFlags: []spec.ExpFlagSpec{},
+		},
+	}
+}
+
+func (*AzureCommandSpec) Name() string {
+	return "azure"
+}
+
+func (*AzureCommandSpec) ShortDesc() string {
+	return "Azure experiment"
+}
+
+func (*AzureCommandSpec) LongDesc() string {
+	return "Azure experiment contains vm start, stop, disk loss"
+}
