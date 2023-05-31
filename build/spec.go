@@ -17,10 +17,12 @@
 package main
 
 import (
-	"github.com/chaosblade-io/chaosblade-exec-cloud/exec/aliyun"
-	"github.com/chaosblade-io/chaosblade-exec-cloud/exec/model"
 	"log"
 	"os"
+
+	"github.com/chaosblade-io/chaosblade-exec-cloud/exec/aliyun"
+	"github.com/chaosblade-io/chaosblade-exec-cloud/exec/azure"
+	"github.com/chaosblade-io/chaosblade-exec-cloud/exec/model"
 
 	"github.com/chaosblade-io/chaosblade-spec-go/spec"
 	"github.com/chaosblade-io/chaosblade-spec-go/util"
@@ -41,6 +43,7 @@ func main() {
 func getModels() *spec.Models {
 	modelCommandSpecs := []spec.ExpModelCommandSpec{
 		aliyun.NewAliyunCommandSpec(),
+		azure.NewAzureCommandSpec(),
 	}
 	specModels := make([]*spec.Models, 0)
 	for _, modeSpec := range modelCommandSpecs {

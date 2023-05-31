@@ -24,11 +24,11 @@ type AzureCommandSpec struct {
 	spec.BaseExpModelCommandSpec
 }
 
-func NewAliyunCommandSpec() spec.ExpModelCommandSpec {
+func NewAzureCommandSpec() spec.ExpModelCommandSpec {
 	return &AzureCommandSpec{
 		spec.BaseExpModelCommandSpec{
 			ExpActions: []spec.ExpActionCommandSpec{
-				// TODO
+				NewVmActionSpec(),
 			},
 			ExpFlags: []spec.ExpFlagSpec{},
 		},
