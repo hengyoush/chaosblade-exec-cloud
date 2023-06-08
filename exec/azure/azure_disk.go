@@ -178,7 +178,7 @@ func (be *DiskExecutor) Exec(uid string, ctx context.Context, model *spec.ExpMod
 		log.Errorf(ctx, "diskName is required!")
 		return spec.ResponseFailWithFlags(spec.ParameterLess, "diskName")
 	}
-	lun, err := strconv.Atoi(model.ActionFlags["diskName"])
+	lun, err := strconv.Atoi(model.ActionFlags["lun"])
 	if err != nil {
 		log.Errorf(ctx, "lun is required and must be valid integer")
 		return spec.ResponseFailWithFlags(spec.ParameterInvalid, "lun")
