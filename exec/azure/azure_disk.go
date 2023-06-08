@@ -68,7 +68,7 @@ func NewDiskActionSpec() spec.ExpActionCommandSpec {
 					Desc: "the disk lun number",
 				},
 			},
-			ActionExecutor: &VmExecutor{},
+			ActionExecutor: &DiskExecutor{},
 			ActionExample: `
 # detach disk 'abc' which virtual machine name is i-x
 blade create azure vm --tenantId xxx --clientId xxx --clientSecret xxx --subscriptionId xxx --resourceGroup xxx --type detach --vmname i-x --diskName abc --lun 1
@@ -343,4 +343,8 @@ func CreateDiskClient(ctx context.Context, tenantId, clientId, clientSecret, sub
 
 func toPtr(i int32) *int32 {
 	return &i
+}
+
+func (be *DiskExecutor) SetChannel(channel spec.Channel) {
+	be.channel = channel
 }
