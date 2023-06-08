@@ -2,6 +2,7 @@ package azure
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"strings"
 
@@ -20,6 +21,8 @@ import (
 )
 
 const VmBin = "chaos_azure_vm"
+const RunningStatus = "PowerState/running"
+const StoppedStatus = "PowerState/stopped"
 
 type VmActionSpec struct {
 	spec.BaseExpActionCommandSpec
@@ -47,7 +50,7 @@ func NewVmActionSpec() spec.ExpActionCommandSpec {
 				},
 				&spec.ExpFlag{
 					Name: "regionId",
-					Desc: "the regionId of azure, like: AZURE, CHINA, US_GOVERMENT, GERMANY. If not provided, get from env AZURE_CLOUD ",
+					Desc: "the regionId of azure, like: PUBLIC, CHINA, GOVERMENT. If not provided, get from env AZURE_CLOUD ",
 				},
 				&spec.ExpFlag{
 					Name: "resourceGroup",
@@ -55,7 +58,7 @@ func NewVmActionSpec() spec.ExpActionCommandSpec {
 				},
 				&spec.ExpFlag{
 					Name: "type",
-					Desc: "the operation of instances, support start, stop, etc",
+					Desc: "the operation of instances, support reboot, start, stop, etc",
 				},
 				&spec.ExpFlag{
 					Name: "vmnames",
@@ -106,7 +109,13 @@ func (*VmExecutor) Name() string {
 
 var localChannel = channel.NewLocalChannel()
 
+type AzureResponse interface {
+	armcompute.VirtualMachinesClientPowerOffResponse | armcompute.VirtualMachinesClientRestartResponse | armcompute.VirtualMachinesClientStartResponse
+}
+
 func (be *VmExecutor) Exec(uid string, ctx context.Context, model *spec.ExpModel) *spec.Response {
+	bytes, _ := json.Marshal(*model)
+	log.Debugf(ctx, "model: %s", string(bytes))
 	if be.channel == nil {
 		util.Errorf(uid, util.GetRunFuncName(), spec.ChannelNil.Msg)
 		return spec.ResponseFailWithFlags(spec.ChannelNil)
@@ -156,7 +165,15 @@ func (be *VmExecutor) Exec(uid string, ctx context.Context, model *spec.ExpModel
 		}
 		resourceGroup = val
 	}
-	// regionId := model.ActionFlags["regionId"]
+	regionId := model.ActionFlags["regionId"]
+	if regionId == "" {
+		val, ok := os.LookupEnv("AZURE_CLOUD")
+		if !ok {
+			log.Errorf(ctx, "could not get AZURE_CLOUD from env or parameter!")
+			return spec.ResponseFailWithFlags(spec.ParameterLess, "regionId")
+		}
+		regionId = val
+	}
 	vmnames := model.ActionFlags["vmnames"]
 	if vmnames == "" {
 		log.Errorf(ctx, "vmnames is required!")
@@ -169,68 +186,136 @@ func (be *VmExecutor) Exec(uid string, ctx context.Context, model *spec.ExpModel
 	}
 
 	vmNamesArray := strings.Split(vmnames, ",")
-	return be.start(ctx, tenantId, clientId, clientSecret, subscriptionId, operationType, resourceGroup, vmNamesArray)
+	statusMap, err := describeInstancesStatus(ctx, tenantId, clientId, clientSecret, subscriptionId, regionId, resourceGroup, vmNamesArray)
+	if err != nil {
+		return spec.ResponseFailWithFlags(spec.ParameterRequestFailed, "describe instances status failed")
+	}
+	for _, vmName := range vmNamesArray {
+		status := statusMap[vmName]
+		if (operationType == "stop" && status == StoppedStatus) || (operationType == "start" && status == RunningStatus) {
+			be.stop(ctx, tenantId, clientId, clientSecret, subscriptionId, regionId, operationType, resourceGroup, vmNamesArray)
+		}
+	}
+
+	return be.start(ctx, tenantId, clientId, clientSecret, subscriptionId, regionId, operationType, resourceGroup, vmNamesArray)
 }
 
-func (be *VmExecutor) start(ctx context.Context, tenantId, clientId, clientSecret, subscriptionId, operationType, resourceGroup string, vmNamesArray []string) *spec.Response {
+func (be *VmExecutor) start(ctx context.Context, tenantId, clientId, clientSecret, subscriptionId, regionId, operationType, resourceGroup string, vmNamesArray []string) *spec.Response {
 	switch operationType {
-	case "start":
-		return be.startInstances(ctx, tenantId, clientId, clientSecret, subscriptionId, resourceGroup, vmNamesArray)
+	case "reboot":
+		return be.rebootInstances(ctx, tenantId, clientId, clientSecret, subscriptionId, regionId, resourceGroup, vmNamesArray)
 	case "stop":
-		return be.stopInstances(ctx, tenantId, clientId, clientSecret, subscriptionId, resourceGroup, vmNamesArray)
+		return be.stopInstances(ctx, tenantId, clientId, clientSecret, subscriptionId, regionId, resourceGroup, vmNamesArray)
+	case "start":
+		return be.startInstances(ctx, tenantId, clientId, clientSecret, subscriptionId, regionId, resourceGroup, vmNamesArray)
 	default:
 		return spec.ResponseFailWithFlags(spec.ParameterInvalid, "type is not support(support start, stop, reboot)")
 	}
-	select {}
 }
 
-func (be *VmExecutor) startInstances(ctx context.Context, tenantId, clientId, clientSecret, subscriptionId, resourceGroup string, vmNamesArray []string) *spec.Response {
-	client, err := CreateVmClient(tenantId, clientId, clientSecret, subscriptionId)
+func (be *VmExecutor) stop(ctx context.Context, tenantId, clientId, clientSecret, subscriptionId, regionId, operationType, resourceGroup string, vmNamesArray []string) *spec.Response {
+	switch operationType {
+	case "reboot":
+		return spec.Success()
+	case "stop":
+		return be.startInstances(ctx, tenantId, clientId, clientSecret, subscriptionId, regionId, resourceGroup, vmNamesArray)
+	case "start":
+		return be.stopInstances(ctx, tenantId, clientId, clientSecret, subscriptionId, regionId, resourceGroup, vmNamesArray)
+	default:
+		return spec.ResponseFailWithFlags(spec.ParameterInvalid, "type is not support(support start, stop, reboot)")
+	}
+}
+
+func (be *VmExecutor) rebootInstances(ctx context.Context, tenantId, clientId, clientSecret, subscriptionId, regionId, resourceGroup string, vmNamesArray []string) *spec.Response {
+	client, err := CreateVmClient(ctx, tenantId, clientId, clientSecret, subscriptionId, regionId)
+	log.Debugf(ctx, "create azure vm client success")
 	if err != nil {
 		log.Errorf(ctx, "create azure client failed, err: %s", err.Error())
 		return spec.ResponseFailWithFlags(spec.ContainerInContextNotFound, "create azure client failed")
 	}
-	pollers := make([]*runtime.Poller[armcompute.VirtualMachinesClientStartResponse], 0)
+	pollers := make([]*runtime.Poller[armcompute.VirtualMachinesClientRestartResponse], 0)
 	for _, vmName := range vmNamesArray {
-		poller, err := client.BeginStart(ctx, resourceGroup, vmName, nil)
+		poller, err := client.BeginRestart(ctx, resourceGroup, vmName, nil)
 		if err != nil {
 			log.Errorf(ctx, "start azure virtual machines failed, err: %s", err.Error())
 			return spec.ResponseFailWithFlags(spec.ContainerInContextNotFound, "start azure virtual machines failed")
 		}
 		pollers = append(pollers, poller)
 	}
-	for _, poller := range pollers {
-		_, err := poller.PollUntilDone(ctx, nil)
-		if err != nil {
-			log.Errorf(ctx, "poll start azure virtual machines result failed, err: %s", err.Error())
-			return spec.ResponseFailWithFlags(spec.ContainerInContextNotFound, "start azure virtual machines failed")
-		}
+	success, err := checkResult(ctx, pollers)
+	if err != nil {
+		log.Errorf(ctx, "poll reboot azure virtual machines result failed, err: %s", err.Error())
+		return spec.ResponseFailWithFlags(spec.ContainerInContextNotFound, "reboot azure virtual machines failed")
+	} else if !success {
+		log.Errorf(ctx, "poll reboot azure virtual machines result failed, err: unknown")
+		return spec.ResponseFailWithFlags(spec.ContainerInContextNotFound, "reboot azure virtual machines failed")
 	}
 	return spec.Success()
 
 }
 
-func (be *VmExecutor) stopInstances(ctx context.Context, tenantId, clientId, clientSecret, subscriptionId, resourceGroup string, vmNamesArray []string) *spec.Response {
-	client, err := CreateVmClient(tenantId, clientId, clientSecret, subscriptionId)
+func checkResult[T AzureResponse](ctx context.Context, pollers []*runtime.Poller[T]) (bool, error) {
+	for _, poller := range pollers {
+		_, err := poller.PollUntilDone(ctx, nil)
+		if err != nil {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+func (be *VmExecutor) stopInstances(ctx context.Context, tenantId, clientId, clientSecret, subscriptionId, regionId, resourceGroup string, vmNamesArray []string) *spec.Response {
+	client, err := CreateVmClient(ctx, tenantId, clientId, clientSecret, subscriptionId, regionId)
 	if err != nil {
 		log.Errorf(ctx, "create azure client failed, err: %s", err.Error())
 		return spec.ResponseFailWithFlags(spec.ContainerInContextNotFound, "create azure client failed")
 	}
+	log.Debugf(ctx, "create azure vm client success")
 	pollers := make([]*runtime.Poller[armcompute.VirtualMachinesClientPowerOffResponse], 0)
 	for _, vmName := range vmNamesArray {
 		poller, err := client.BeginPowerOff(ctx, resourceGroup, vmName, nil)
+
 		if err != nil {
 			log.Errorf(ctx, "stop azure virtual machines failed, err: %s", err.Error())
 			return spec.ResponseFailWithFlags(spec.ContainerInContextNotFound, "stop azure virtual machines failed")
 		}
 		pollers = append(pollers, poller)
 	}
-	for _, poller := range pollers {
-		_, err := poller.PollUntilDone(ctx, nil)
+	success, err := checkResult(ctx, pollers)
+	if err != nil {
+		log.Errorf(ctx, "poll stop azure virtual machines result failed, err: %s", err.Error())
+		return spec.ResponseFailWithFlags(spec.ContainerInContextNotFound, "stop azure virtual machines failed")
+	} else if !success {
+		log.Errorf(ctx, "poll stop azure virtual machines result failed, err: unknown")
+		return spec.ResponseFailWithFlags(spec.ContainerInContextNotFound, "stop azure virtual machines failed")
+	}
+	return spec.Success()
+}
+
+func (be *VmExecutor) startInstances(ctx context.Context, tenantId, clientId, clientSecret, subscriptionId, regionId, resourceGroup string, vmNamesArray []string) *spec.Response {
+	client, err := CreateVmClient(ctx, tenantId, clientId, clientSecret, subscriptionId, regionId)
+	if err != nil {
+		log.Errorf(ctx, "create azure client failed, err: %s", err.Error())
+		return spec.ResponseFailWithFlags(spec.ContainerInContextNotFound, "create azure client failed")
+	}
+	log.Debugf(ctx, "create azure vm client success")
+	pollers := make([]*runtime.Poller[armcompute.VirtualMachinesClientStartResponse], 0)
+	for _, vmName := range vmNamesArray {
+		poller, err := client.BeginStart(ctx, resourceGroup, vmName, nil)
+
 		if err != nil {
-			log.Errorf(ctx, "poll stop azure virtual machines result failed, err: %s", err.Error())
-			return spec.ResponseFailWithFlags(spec.ContainerInContextNotFound, "stop azure virtual machines failed")
+			log.Errorf(ctx, "start azure virtual machines failed, err: %s", err.Error())
+			return spec.ResponseFailWithFlags(spec.ContainerInContextNotFound, "start azure virtual machines failed")
 		}
+		pollers = append(pollers, poller)
+	}
+	success, err := checkResult(ctx, pollers)
+	if err != nil {
+		log.Errorf(ctx, "poll start azure virtual machines result failed, err: %s", err.Error())
+		return spec.ResponseFailWithFlags(spec.ContainerInContextNotFound, "start azure virtual machines failed")
+	} else if !success {
+		log.Errorf(ctx, "poll start azure virtual machines result failed, err: unknown")
+		return spec.ResponseFailWithFlags(spec.ContainerInContextNotFound, "start azure virtual machines failed")
 	}
 	return spec.Success()
 }
@@ -239,28 +324,50 @@ func (be *VmExecutor) SetChannel(channel spec.Channel) {
 	be.channel = channel
 }
 
-func CreateVmClient(tenantId, clientId, clientSecret, subscriptionId string) (*armcompute.VirtualMachinesClient, error) {
+func CreateVmClient(ctx context.Context, tenantId, clientId, clientSecret, subscriptionId, regionId string) (*armcompute.VirtualMachinesClient, error) {
 	cred, err := azidentity.NewClientSecretCredential(tenantId, clientId, clientSecret, nil)
 	if err != nil {
-		// TODO
+		log.Errorf(ctx, "create azure vm client failed, err: %s", err.Error())
 	}
 	options := &arm.ClientOptions{
 		ClientOptions: policy.ClientOptions{
-			Cloud: cloud.AzurePublic,
+			Cloud: AzureCloud(regionId),
 		},
 	}
 	return armcompute.NewVirtualMachinesClient(subscriptionId, cred, options)
 }
 
-func CreateDiskClient(tenantId, clientId, clientSecret, subscriptionId string) (*armcompute.DisksClient, error) {
-	cred, err := azidentity.NewClientSecretCredential(tenantId, clientId, clientSecret, nil)
-	if err != nil {
-		// TODO
+func AzureCloud(regionId string) cloud.Configuration {
+	switch strings.ToUpper(regionId) {
+	case "CHINA":
+		return cloud.AzureChina
+	case "GOVERMENT":
+		return cloud.AzureGovernment
+	default:
+		return cloud.AzurePublic
 	}
-	options := &arm.ClientOptions{
-		ClientOptions: policy.ClientOptions{
-			Cloud: cloud.AzurePublic,
-		},
+}
+
+func describeInstancesStatus(ctx context.Context, tenantId, clientId, clientSecret, subscriptionId, regionId, resourceGroup string, vmNames []string) (_result map[string]string, _err error) {
+	client, _err := CreateVmClient(ctx, tenantId, clientId, clientSecret, subscriptionId, regionId)
+	if _err != nil {
+		log.Errorf(ctx, "create azure client failed, err: %s", _err.Error())
+		return _result, _err
 	}
-	return armcompute.NewDisksClient(subscriptionId, cred, options)
+	statusMap := map[string]string{}
+	for _, vmName := range vmNames {
+		res, _err := client.InstanceView(ctx, resourceGroup, vmName, nil)
+		if _err != nil {
+			log.Errorf(ctx, "get vm instance status failed, err: %s", _err.Error())
+			return _result, _err
+		}
+		for _, status := range res.Statuses {
+			if strings.HasPrefix(*status.Code, "PowerState/") {
+				statusMap[vmName] = *status.Code
+				break
+			}
+		}
+	}
+	_result = statusMap
+	return _result, nil
 }

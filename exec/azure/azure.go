@@ -29,6 +29,7 @@ func NewAzureCommandSpec() spec.ExpModelCommandSpec {
 		spec.BaseExpModelCommandSpec{
 			ExpActions: []spec.ExpActionCommandSpec{
 				NewVmActionSpec(),
+				NewDiskActionSpec(),
 			},
 			ExpFlags: []spec.ExpFlagSpec{},
 		},
@@ -44,5 +45,5 @@ func (*AzureCommandSpec) ShortDesc() string {
 }
 
 func (*AzureCommandSpec) LongDesc() string {
-	return "Azure experiment contains vm start, stop, disk loss"
+	return "Azure experiment contains vm start, stop, disk detach"
 }
